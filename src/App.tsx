@@ -13,7 +13,20 @@ import {
 import './App.css'
 
 const SETTINGS_KEY = 'font-library-settings'
+const PREVIEW_COLORS_KEY = 'font-library-preview-colors'
 const defaultVariant: FontVariant = { style: 'normal', weightMin: 400, weightMax: 400 }
+const defaultPreviewColors: PreviewColors = { background: '#ffffff', foreground: '#292824' }
+
+type PreviewColors = {
+  background: string
+  foreground: string
+}
+
+type WeightSample = {
+  style: string
+  weight: number
+  variableRange?: FontVariant
+}
 
 function getFontIdFromHash() {
   const match = window.location.hash.match(/^#\/font\/([^/]+)$/)
@@ -50,6 +63,29 @@ function readSettings(): RepositorySettings {
   }
 
   return { ...defaults, branch: 'main', token: '' }
+}
+
+function readPreviewColors(): PreviewColors {
+  try {
+    const stored: unknown = JSON.parse(localStorage.getItem(PREVIEW_COLORS_KEY) ?? 'null')
+    if (
+      typeof stored === 'object' &&
+      stored !== null &&
+      'background' in stored &&
+      isRgbColor(stored.background) &&
+      'foreground' in stored &&
+      isRgbColor(stored.foreground)
+    ) {
+      return { background: stored.background, foreground: stored.foreground }
+    }
+  } catch {
+    return defaultPreviewColors
+  }
+  return defaultPreviewColors
+}
+
+function isRgbColor(value: unknown): value is string {
+  return typeof value === 'string' && /^#[0-9a-f]{6}$/i.test(value)
 }
 
 function App() {
@@ -558,6 +594,7 @@ function FontDetail({
     variants: FontVariant[]
   } | null>(null)
   const [discoveryError, setDiscoveryError] = useState<{ key: string; message: string } | null>(null)
+  const [previewColors, setPreviewColors] = useState(readPreviewColors)
   const remoteUrl = font.source.kind === 'remote' ? font.source.url : ''
   const discoveryKey = `${font.id}:${remoteUrl}`
   const needsDiscovery = Boolean(remoteUrl && !font.variants?.length)
@@ -568,6 +605,12 @@ function FontDetail({
     ? font.variants
     : discoveredVariants ?? getFontVariants(font)
   const firstVariant = variants[0]
+  const weightSamples = buildWeightSamples(variants)
+  const variableRanges = variants.filter((variant) => variant.weightMin < variant.weightMax)
+
+  useEffect(() => {
+    localStorage.setItem(PREVIEW_COLORS_KEY, JSON.stringify(previewColors))
+  }, [previewColors])
 
   useEffect(() => {
     if (!needsDiscovery) return
@@ -605,7 +648,7 @@ function FontDetail({
         <div>
           <div className="eyebrow"><span className="eyebrow-line" /> СЕМЕЙСТВО ШРИФТА</div>
           <h1>{font.name}</h1>
-          <p>{isDiscovering ? 'Определяем варианты…' : `${formatVariantCount(variants.length)} · ${font.family}`}</p>
+          <p>{isDiscovering ? 'Определяем варианты…' : `${formatVariantCount(weightSamples.length)} · ${font.family}`}</p>
         </div>
         <button
           className="button button-secondary detail-delete"
@@ -628,9 +671,43 @@ function FontDetail({
         </div>
       )}
 
+      <div className="preview-toolbar">
+        <div>
+          <strong>Цвет предпросмотра</strong>
+          <p>Настройте фон и цвет текста</p>
+        </div>
+        <div className="preview-colors">
+          <label className="color-control">
+            <span>ФОН</span>
+            <input
+              type="color"
+              aria-label="Цвет фона"
+              value={previewColors.background}
+              onChange={(event) => setPreviewColors((colors) => ({ ...colors, background: event.target.value }))}
+            />
+            <output>{previewColors.background.toUpperCase()}</output>
+          </label>
+          <label className="color-control">
+            <span>ТЕКСТ</span>
+            <input
+              type="color"
+              aria-label="Цвет текста"
+              value={previewColors.foreground}
+              onChange={(event) => setPreviewColors((colors) => ({ ...colors, foreground: event.target.value }))}
+            />
+            <output>{previewColors.foreground.toUpperCase()}</output>
+          </label>
+          <button type="button" className="reset-colors" onClick={() => setPreviewColors(defaultPreviewColors)}>
+            Сбросить
+          </button>
+        </div>
+      </div>
+
       <div
         className="detail-specimen"
         style={{
+          backgroundColor: previewColors.background,
+          color: previewColors.foreground,
           fontFamily: `"${font.family}", Georgia, serif`,
           fontWeight: firstVariant.weightMin,
           fontStyle: firstVariant.style,
@@ -643,67 +720,135 @@ function FontDetail({
 
       <div className="variant-section-heading">
         <div>
-          <h2>Начертания <span className="count">{String(variants.length).padStart(2, '0')}</span></h2>
-          <p>Все варианты, объявленные в таблице @font-face</p>
+          <h2>Варианты <span className="count">{String(weightSamples.length).padStart(2, '0')}</span></h2>
+          <p>Основные доступные веса и стили из @font-face</p>
         </div>
       </div>
 
       {isDiscovering ? (
         <div className="loading-state"><span className="spinner" />Читаем @font-face…</div>
       ) : (
-        <div className="variant-grid">
-          {variants.map((variant) => (
-            <VariantPreview key={`${variant.style}-${variant.weightMin}-${variant.weightMax}`} font={font} variant={variant} />
-          ))}
-        </div>
+        <>
+          <div className="weight-list">
+            {weightSamples.map((sample) => (
+              <WeightPreviewRow
+                key={`${sample.style}-${sample.weight}`}
+                font={font}
+                sample={sample}
+                colors={previewColors}
+              />
+            ))}
+          </div>
+          {variableRanges.length > 0 && (
+            <section className="variable-section">
+              <div className="variant-section-heading">
+                <div>
+                  <h2>Произвольный вес</h2>
+                  <p>Для variable-font можно выбрать любое значение в диапазоне</p>
+                </div>
+              </div>
+              <div className="variable-controls">
+                {variableRanges.map((variant) => (
+                  <VariableWeightPreview
+                    key={`${variant.style}-${variant.weightMin}-${variant.weightMax}`}
+                    font={font}
+                    variant={variant}
+                    colors={previewColors}
+                  />
+                ))}
+              </div>
+            </section>
+          )}
+        </>
       )}
     </section>
   )
 }
 
-function VariantPreview({ font, variant }: { font: FontRecord; variant: FontVariant }) {
-  const [weight, setWeight] = useState(variant.weightMin)
-  const isVariable = variant.weightMin < variant.weightMax
+function WeightPreviewRow({
+  font,
+  sample,
+  colors,
+}: {
+  font: FontRecord
+  sample: WeightSample
+  colors: PreviewColors
+}) {
+  const name = fontWeightName(sample.weight)
 
   return (
-    <article className="variant-card">
-      <div className="variant-card-header">
-        <div>
-          <span className="variant-label">{variantLabel(variant)}</span>
-          <h3>{fontStyleName(variant.style)}</h3>
-        </div>
-        <span className="weight-badge">
-          {isVariable ? `${variant.weightMin}–${variant.weightMax}` : variant.weightMin}
-        </span>
+    <article
+      className="weight-row"
+      style={{ backgroundColor: colors.background, color: colors.foreground }}
+    >
+      <div className="weight-row-meta">
+        <span className="weight-number">{sample.weight}</span>
+        <span className="weight-name">{name || 'Custom'}</span>
+        {sample.style !== 'normal' && <span className="style-name">{fontStyleName(sample.style)}</span>}
+        {sample.variableRange && <span className="range-name">VARIABLE</span>}
       </div>
       <div
-        className="variant-sample"
+        className="weight-row-sample"
+        style={{
+          fontFamily: `"${font.family}", Georgia, serif`,
+          fontWeight: sample.weight,
+          fontStyle: sample.style,
+        }}
+      >
+        <span className="weight-row-large">Aa Bb</span>
+        <span className="weight-row-text">The quick brown fox jumps over the lazy dog</span>
+        <span className="weight-row-text">Съешь ещё этих мягких французских булок 0123456789</span>
+      </div>
+    </article>
+  )
+}
+
+function VariableWeightPreview({
+  font,
+  variant,
+  colors,
+}: {
+  font: FontRecord
+  variant: FontVariant
+  colors: PreviewColors
+}) {
+  const [weight, setWeight] = useState(variant.weightMin)
+
+  return (
+    <article
+      className="variable-preview"
+      style={{ backgroundColor: colors.background, color: colors.foreground }}
+    >
+      <div className="variable-preview-header">
+        <div>
+          <span className="variant-label">{fontStyleName(variant.style)}</span>
+          <h3>Диапазон {variant.weightMin}–{variant.weightMax}</h3>
+        </div>
+        <output>{weight}</output>
+      </div>
+      <div
+        className="variable-sample"
         style={{
           fontFamily: `"${font.family}", Georgia, serif`,
           fontWeight: weight,
           fontStyle: variant.style,
         }}
       >
-        <span className="variant-sample-large">Aa Bb</span>
-        <span className="variant-sample-copy">The quick brown fox jumps over the lazy dog</span>
-        <span className="variant-sample-copy">Съешь ещё этих мягких французских булок 0123456789</span>
+        Aa Bb — Съешь ещё этих мягких французских булок
       </div>
-      {isVariable && (
-        <label className="weight-control">
-          <span>Light</span>
-          <input
-            type="range"
-            min={variant.weightMin}
-            max={variant.weightMax}
-            step="1"
-            value={weight}
-            aria-label={`Вес ${font.family}`}
-            onChange={(event) => setWeight(Number(event.target.value))}
-          />
-          <span>Bold</span>
-          <output>{weight}</output>
-        </label>
-      )}
+      <label className="weight-control">
+        <span>Light</span>
+        <input
+          type="range"
+          min={variant.weightMin}
+          max={variant.weightMax}
+          step="1"
+          value={weight}
+          aria-label={`Вес ${font.family}`}
+          onChange={(event) => setWeight(Number(event.target.value))}
+        />
+        <span>Bold</span>
+      </label>
     </article>
   )
 }
@@ -732,7 +877,48 @@ function fontVariantSummary(font: FontRecord) {
   return formatVariantCount(getFontVariants(font).length)
 }
 
-function variantLabel(variant: FontVariant) {
+function buildWeightSamples(variants: FontVariant[]): WeightSample[] {
+  const standardWeights = [100, 200, 300, 400, 500, 600, 700, 800, 900]
+  const samples = new Map<string, WeightSample>()
+
+  for (const variant of variants) {
+    const isVariable = variant.weightMin < variant.weightMax
+    const weights = isVariable
+      ? [...new Set([
+          variant.weightMin,
+          ...standardWeights.filter((weight) => weight >= variant.weightMin && weight <= variant.weightMax),
+          variant.weightMax,
+        ])]
+      : [variant.weightMin]
+
+    for (const weight of weights) {
+      const key = `${variant.style.toLowerCase()}:${weight}`
+      const sample: WeightSample = {
+        style: variant.style,
+        weight,
+        ...(isVariable ? { variableRange: variant } : {}),
+      }
+      const existing = samples.get(key)
+      if (!existing || (existing.variableRange && !sample.variableRange)) {
+        samples.set(key, sample)
+      }
+    }
+  }
+
+  const styleOrder = (style: string) => {
+    if (style === 'normal') return 0
+    if (style === 'italic') return 1
+    return 2
+  }
+  return [...samples.values()].sort(
+    (left, right) =>
+      styleOrder(left.style) - styleOrder(right.style) ||
+      left.style.localeCompare(right.style) ||
+      left.weight - right.weight,
+  )
+}
+
+function fontWeightName(weight: number) {
   const weightNames: Record<number, string> = {
     100: 'Thin',
     200: 'ExtraLight',
@@ -744,15 +930,7 @@ function variantLabel(variant: FontVariant) {
     800: 'ExtraBold',
     900: 'Black',
   }
-  const weight = variant.weightMin === variant.weightMax
-    ? `${weightNames[variant.weightMin] ?? 'Weight'} · ${variant.weightMin}`
-    : `Variable · ${variant.weightMin}–${variant.weightMax}`
-  const style = variant.style === 'normal'
-    ? ''
-    : variant.style.startsWith('oblique')
-      ? 'Наклонный'
-      : 'Курсив'
-  return [style, weight].filter(Boolean).join(' · ')
+  return weightNames[weight] ?? ''
 }
 
 function fontStyleName(style: string) {
