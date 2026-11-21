@@ -50,16 +50,41 @@ function branchQuery(branch: string) {
 }
 
 export async function loadFonts(settings: PublicRepositorySettings): Promise<FontRecord[]> {
-  const branch = settings.branch.split('/').map(encodeURIComponent).join('/')
-  const url = `https://raw.githubusercontent.com/${encodeURIComponent(settings.owner)}/${encodeURIComponent(settings.repo)}/${branch}/public/fonts.json?t=${Date.now()}`
-  const response = await fetch(url, { cache: 'no-store' })
+  if (isCurrentPagesRepository(settings)) {
+    const url = new URL(`${import.meta.env.BASE_URL}fonts.json?t=${Date.now()}`, window.location.origin)
+    const response = await fetch(url, { cache: 'no-store' })
 
-  if (response.status === 404) return []
-  if (!response.ok) {
-    throw new Error(`Не удалось прочитать список шрифтов (${response.status}). Проверьте владельца, репозиторий и ветку.`)
+    if (response.status === 404) return []
+    if (!response.ok) {
+      throw new Error(`Не удалось прочитать список шрифтов на GitHub Pages (${response.status}).`)
+    }
+
+    return parseFonts(await response.json())
   }
 
-  return parseFonts(await response.json())
+  const file = await getFile({ ...settings, token: '' }, 'public/fonts.json')
+  if (!file) return []
+  if (!file.content || file.encoding !== 'base64') {
+    throw new Error('GitHub вернул public/fonts.json в неподдерживаемом формате.')
+  }
+
+  try {
+    return parseFonts(JSON.parse(decodeBase64(file.content)))
+  } catch (cause) {
+    throw new Error(
+      `Не удалось прочитать public/fonts.json: ${cause instanceof Error ? cause.message : 'неверный JSON'}`,
+    )
+  }
+}
+
+function isCurrentPagesRepository(settings: PublicRepositorySettings) {
+  const hostname = window.location.hostname
+  if (!hostname.endsWith('.github.io') || settings.branch !== 'main') return false
+
+  const owner = hostname.slice(0, -'.github.io'.length)
+  const repo = window.location.pathname.split('/').filter(Boolean)[0] || `${owner}.github.io`
+  return settings.owner.toLowerCase() === owner.toLowerCase() &&
+    settings.repo.toLowerCase() === repo.toLowerCase()
 }
 
 function parseFonts(manifest: unknown): FontRecord[] {
