@@ -1,16 +1,30 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import {
-  addFont,
+  addFonts,
   deleteFontFile,
+  inspectRemoteFont,
   loadFonts,
   removeFont,
   uploadFontFile,
   type FontRecord,
+  type FontVariant,
   type RepositorySettings,
 } from './fontRepository'
 import './App.css'
 
 const SETTINGS_KEY = 'font-library-settings'
+const defaultVariant: FontVariant = { style: 'normal', weightMin: 400, weightMax: 400 }
+
+function getFontIdFromHash() {
+  const match = window.location.hash.match(/^#\/font\/([^/]+)$/)
+  if (!match) return ''
+
+  try {
+    return decodeURIComponent(match[1])
+  } catch {
+    return ''
+  }
+}
 
 function getDefaultRepository() {
   const owner = window.location.hostname.endsWith('.github.io')
@@ -46,10 +60,18 @@ function App() {
   const [notice, setNotice] = useState('')
   const [saving, setSaving] = useState(false)
   const [showAdd, setShowAdd] = useState(false)
+  const [selectedFontId, setSelectedFontId] = useState(getFontIdFromHash)
   const [showSettings, setShowSettings] = useState(() => {
     const saved = readSettings()
     return !saved.owner || !saved.repo
   })
+  const selectedFont = fonts.find((font) => font.id === selectedFontId)
+
+  useEffect(() => {
+    const handleHashChange = () => setSelectedFontId(getFontIdFromHash())
+    window.addEventListener('hashchange', handleHashChange)
+    return () => window.removeEventListener('hashchange', handleHashChange)
+  }, [])
 
   useEffect(() => {
     let active = true
@@ -82,9 +104,12 @@ function App() {
 
   useEffect(() => {
     const cleanups: (() => void)[] = []
+    const linkedStylesheets = new Set<string>()
 
     for (const font of fonts) {
       if (font.source.kind === 'remote') {
+        if (linkedStylesheets.has(font.source.url)) continue
+        linkedStylesheets.add(font.source.url)
         const link = document.createElement('link')
         link.rel = 'stylesheet'
         link.href = font.source.url
@@ -115,10 +140,7 @@ function App() {
   async function handleAdd(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     const form = new FormData(event.currentTarget)
-    const name = String(form.get('name') ?? '').trim()
-    const family = String(form.get('family') ?? '').trim()
     const kind = String(form.get('kind') ?? 'remote')
-    const id = crypto.randomUUID()
 
     setSaving(true)
     setError('')
@@ -126,9 +148,11 @@ function App() {
     let uploadedPath: string | undefined
 
     try {
-      let source: FontRecord['source']
+      let additions: FontRecord[]
 
       if (kind === 'file') {
+        const name = String(form.get('name') ?? '').trim()
+        const family = String(form.get('family') ?? '').trim()
         const file = form.get('file')
         if (!(file instanceof File) || file.size === 0) {
           throw new Error('Выберите файл шрифта.')
@@ -140,8 +164,16 @@ function App() {
           throw new Error('Поддерживаются файлы WOFF, WOFF2, TTF и OTF.')
         }
 
+        const id = crypto.randomUUID()
         uploadedPath = await uploadFontFile(settings, file, id)
-        source = { kind: 'file', path: uploadedPath }
+        additions = [{
+          id,
+          name,
+          family,
+          source: { kind: 'file', path: uploadedPath },
+          variants: [defaultVariant],
+          createdAt: new Date().toISOString(),
+        }]
       } else {
         const url = String(form.get('url') ?? '').trim()
         try {
@@ -149,15 +181,26 @@ function App() {
         } catch {
           throw new Error('Укажите корректную ссылку на HTTPS-таблицу стилей.')
         }
-        source = { kind: 'remote', url }
+        const families = await inspectRemoteFont(url)
+        const createdAt = new Date().toISOString()
+        additions = families.map(({ family, variants }) => ({
+          id: crypto.randomUUID(),
+          name: family,
+          family,
+          source: { kind: 'remote', url },
+          variants,
+          createdAt,
+        }))
       }
 
-      const font: FontRecord = { id, name, family, source, createdAt: new Date().toISOString() }
-      const next = await addFont(settings, font)
+      const next = await addFonts(settings, additions)
       uploadedPath = undefined
       setFonts(next)
       setShowAdd(false)
-      setNotice(`«${name}» добавлен в библиотеку.`)
+      if (selectedFontId) window.location.hash = '#/'
+      setNotice(additions.length === 1
+        ? `«${additions[0].name}» добавлен в библиотеку.`
+        : `Добавлено семейств: ${additions.map((font) => font.name).join(', ')}.`)
     } catch (cause) {
       let message = cause instanceof Error ? cause.message : 'Не удалось добавить шрифт.'
       if (uploadedPath) {
@@ -183,6 +226,7 @@ function App() {
     try {
       const next = await removeFont(settings, font.id, font.name)
       setFonts(next)
+      if (selectedFontId === font.id) window.location.hash = '#/'
 
       if (font.source.kind === 'file') {
         try {
@@ -209,7 +253,7 @@ function App() {
   return (
     <div className="app-shell">
       <header className="topbar">
-        <a className="brand" href="#" aria-label="Коллекция — главная">
+        <a className="brand" href="#/" aria-label="Коллекция — главная">
           <span className="brand-mark">Aa</span>
           <span>type<span className="brand-dot">.</span>library</span>
         </a>
@@ -235,6 +279,27 @@ function App() {
       </header>
 
       <main className="main-content">
+        {selectedFontId ? (
+          selectedFont ? (
+            <FontDetail
+              font={selectedFont}
+              error={error}
+              notice={notice}
+              canEdit={canEdit}
+              saving={saving}
+              onDelete={() => void handleDelete(selectedFont)}
+            />
+          ) : loading ? (
+            <div className="loading-state"><span className="spinner" />Загружаем шрифт…</div>
+          ) : (
+            <section className="font-not-found">
+              <a className="back-link" href="#/">← Все шрифты</a>
+              <h1>Шрифт не найден</h1>
+              <p>Возможно, его удалили из библиотеки.</p>
+            </section>
+          )
+        ) : (
+          <>
         <section className="intro">
           <div className="eyebrow"><span className="eyebrow-line" /> ВАША ЛИЧНАЯ КОЛЛЕКЦИЯ</div>
           <h1>Шрифты, которые<br /><span>говорят за вас.</span></h1>
@@ -245,7 +310,7 @@ function App() {
           <div className="section-heading">
             <div>
               <h2>Моя коллекция <span className="count">{fonts.length.toString().padStart(2, '0')}</span></h2>
-              <p>Все любимые начертания в одном месте</p>
+              <p>Откройте карточку, чтобы увидеть все варианты</p>
             </div>
             {configured && (
               <div className="repo-label"><span className="repo-icon">⌘</span>{settings.owner}/{settings.repo}</div>
@@ -276,7 +341,9 @@ function App() {
             <div className="loading-state"><span className="spinner" />Загружаем коллекцию…</div>
           ) : fonts.length > 0 ? (
             <div className="font-grid">
-              {fonts.map((font, index) => (
+              {fonts.map((font, index) => {
+                const primaryVariant = getFontVariants(font)[0]
+                return (
                 <article className="font-card" key={font.id}>
                   <div className="card-topline">
                     <span className="font-index">{String(index + 1).padStart(2, '0')}</span>
@@ -284,21 +351,32 @@ function App() {
                       <TrashIcon />
                     </button>
                   </div>
-                  <div className="font-preview" style={{ fontFamily: `"${font.family}", Georgia, serif` }}>
-                    Ag
-                  </div>
-                  <div className="card-bottom">
-                    <div>
-                      <h3>{font.name}</h3>
-                      <p>{font.family}</p>
+                  <a className="font-card-link" href={`#/font/${encodeURIComponent(font.id)}`} aria-label={`Открыть семейство ${font.name}`}>
+                    <div
+                      className="font-preview"
+                      style={{
+                        fontFamily: `"${font.family}", Georgia, serif`,
+                        fontWeight: primaryVariant.weightMin,
+                        fontStyle: primaryVariant.style,
+                      }}
+                    >
+                      Ag
                     </div>
-                    <span className="source-tag">{font.source.kind === 'file' ? 'ФАЙЛ' : 'ССЫЛКА'}</span>
-                  </div>
-                  <div className="sample-line" style={{ fontFamily: `"${font.family}", Georgia, serif` }}>
-                    Съешь ещё этих мягких французских булок
-                  </div>
+                    <div className="card-bottom">
+                      <div>
+                        <h3>{font.name}</h3>
+                        <p>{font.family}</p>
+                        <p className="variant-count">{formatVariantCount(getFontVariants(font).length)}</p>
+                      </div>
+                      <span className="source-tag">{font.source.kind === 'file' ? 'ФАЙЛ' : 'ССЫЛКА'}</span>
+                    </div>
+                    <div className="sample-line" style={{ fontFamily: `"${font.family}", Georgia, serif` }}>
+                      Съешь ещё этих мягких французских булок
+                    </div>
+                  </a>
                 </article>
-              ))}
+                )
+              })}
             </div>
           ) : configured && !error ? (
             <div className="empty-state">
@@ -309,6 +387,8 @@ function App() {
             </div>
           ) : null}
         </section>
+          </>
+        )}
       </main>
 
       <footer className="footer">
@@ -397,31 +477,37 @@ function AddFontDialog({
     <Dialog title="Новый шрифт" onClose={onClose}>
       <form className="dialog-form" onSubmit={onSubmit}>
         <p className="dialog-description">Добавьте веб-шрифт по ссылке или загрузите файл в репозиторий.</p>
+        <input type="hidden" name="kind" value={kind} />
         <div className="segmented-control" role="tablist" aria-label="Способ добавления">
           <button type="button" className={kind === 'remote' ? 'selected' : ''} onClick={() => setKind('remote')}>По ссылке</button>
           <button type="button" className={kind === 'file' ? 'selected' : ''} onClick={() => setKind('file')}>Загрузить файл</button>
         </div>
-        <label className="field">
-          <span>Название в коллекции</span>
-          <input name="name" required placeholder="Например, Editorial New" autoFocus />
-        </label>
-        <label className="field">
-          <span>Имя семейства CSS</span>
-          <input name="family" required placeholder="Например, Editorial New" />
-        </label>
         {kind === 'remote' ? (
-          <label className="field">
-            <span>HTTPS-ссылка на CSS</span>
-            <input name="url" type="url" required placeholder="https://fonts.googleapis.com/css2?family=…" />
-            <small>Вставьте ссылку на таблицу стилей веб-шрифта, например из Google Fonts.</small>
-          </label>
+          <>
+            <label className="field">
+              <span>HTTPS-ссылка на CSS</span>
+              <input name="url" type="url" required placeholder="https://fonts.googleapis.com/css2?family=…" autoFocus />
+              <small>Семейства, начертания и веса будут определены автоматически из @font-face.</small>
+            </label>
+            <div className="parser-note">Если в ссылке несколько семейств, для каждого появится отдельная карточка.</div>
+          </>
         ) : (
-          <label className="file-drop">
-            <input name="file" type="file" required accept=".woff,.woff2,.ttf,.otf" />
-            <span className="upload-icon">↑</span>
-            <b>Выберите файл шрифта</b>
-            <span>WOFF, WOFF2, TTF или OTF · до 10 МБ</span>
-          </label>
+          <>
+            <label className="field">
+              <span>Название в коллекции</span>
+              <input name="name" required placeholder="Например, Editorial New" autoFocus />
+            </label>
+            <label className="field">
+              <span>Имя семейства CSS</span>
+              <input name="family" required placeholder="Например, Editorial New" />
+            </label>
+            <label className="file-drop">
+              <input name="file" type="file" required accept=".woff,.woff2,.ttf,.otf" />
+              <span className="upload-icon">↑</span>
+              <b>Выберите файл шрифта</b>
+              <span>WOFF, WOFF2, TTF или OTF · до 10 МБ</span>
+            </label>
+          </>
         )}
         <div className="dialog-actions">
           <button type="button" className="button button-quiet" onClick={onClose} disabled={saving}>Отмена</button>
@@ -444,6 +530,172 @@ function Dialog({ title, onClose, children }: { title: string; onClose: () => vo
       </section>
     </div>
   )
+}
+
+function FontDetail({
+  font,
+  error,
+  notice,
+  canEdit,
+  saving,
+  onDelete,
+}: {
+  font: FontRecord
+  error: string
+  notice: string
+  canEdit: boolean
+  saving: boolean
+  onDelete: () => void
+}) {
+  const variants = getFontVariants(font)
+  const firstVariant = variants[0]
+
+  return (
+    <section className="font-detail">
+      <a className="back-link" href="#/">← Все шрифты</a>
+      <div className="detail-title-row">
+        <div>
+          <div className="eyebrow"><span className="eyebrow-line" /> СЕМЕЙСТВО ШРИФТА</div>
+          <h1>{font.name}</h1>
+          <p>{formatVariantCount(variants.length)} · {font.family}</p>
+        </div>
+        <button
+          className="button button-secondary detail-delete"
+          onClick={onDelete}
+          disabled={!canEdit || saving}
+        >
+          <TrashIcon />
+          Удалить семейство
+        </button>
+      </div>
+
+      {(error || notice) && (
+        <div className={`feedback ${error ? 'feedback-error' : 'feedback-success'}`} role="status">
+          {error || notice}
+        </div>
+      )}
+
+      <div
+        className="detail-specimen"
+        style={{
+          fontFamily: `"${font.family}", Georgia, serif`,
+          fontWeight: firstVariant.weightMin,
+          fontStyle: firstVariant.style,
+        }}
+      >
+        <span className="detail-specimen-label">Aa</span>
+        <span className="detail-specimen-text">Ag</span>
+        <span className="detail-specimen-caption">Панграмма: Съешь ещё этих мягких французских булок</span>
+      </div>
+
+      <div className="variant-section-heading">
+        <div>
+          <h2>Начертания <span className="count">{String(variants.length).padStart(2, '0')}</span></h2>
+          <p>Все варианты, объявленные в таблице @font-face</p>
+        </div>
+      </div>
+
+      <div className="variant-grid">
+        {variants.map((variant) => (
+          <VariantPreview key={`${variant.style}-${variant.weightMin}-${variant.weightMax}`} font={font} variant={variant} />
+        ))}
+      </div>
+    </section>
+  )
+}
+
+function VariantPreview({ font, variant }: { font: FontRecord; variant: FontVariant }) {
+  const [weight, setWeight] = useState(variant.weightMin)
+  const isVariable = variant.weightMin < variant.weightMax
+
+  return (
+    <article className="variant-card">
+      <div className="variant-card-header">
+        <div>
+          <span className="variant-label">{variantLabel(variant)}</span>
+          <h3>{fontStyleName(variant.style)}</h3>
+        </div>
+        <span className="weight-badge">
+          {isVariable ? `${variant.weightMin}–${variant.weightMax}` : variant.weightMin}
+        </span>
+      </div>
+      <div
+        className="variant-sample"
+        style={{
+          fontFamily: `"${font.family}", Georgia, serif`,
+          fontWeight: weight,
+          fontStyle: variant.style,
+        }}
+      >
+        <span className="variant-sample-large">Aa Bb</span>
+        <span className="variant-sample-copy">The quick brown fox jumps over the lazy dog</span>
+        <span className="variant-sample-copy">Съешь ещё этих мягких французских булок 0123456789</span>
+      </div>
+      {isVariable && (
+        <label className="weight-control">
+          <span>Light</span>
+          <input
+            type="range"
+            min={variant.weightMin}
+            max={variant.weightMax}
+            step="1"
+            value={weight}
+            aria-label={`Вес ${font.family}`}
+            onChange={(event) => setWeight(Number(event.target.value))}
+          />
+          <span>Bold</span>
+          <output>{weight}</output>
+        </label>
+      )}
+    </article>
+  )
+}
+
+function getFontVariants(font: FontRecord) {
+  return font.variants?.length ? font.variants : [defaultVariant]
+}
+
+function formatVariantCount(count: number) {
+  const tens = count % 100
+  const ones = count % 10
+  const word = tens >= 11 && tens <= 14
+    ? 'вариантов'
+    : ones === 1
+      ? 'вариант'
+      : ones >= 2 && ones <= 4
+        ? 'варианта'
+        : 'вариантов'
+  return `${count} ${word}`
+}
+
+function variantLabel(variant: FontVariant) {
+  const weightNames: Record<number, string> = {
+    100: 'Thin',
+    200: 'ExtraLight',
+    300: 'Light',
+    400: 'Regular',
+    500: 'Medium',
+    600: 'SemiBold',
+    700: 'Bold',
+    800: 'ExtraBold',
+    900: 'Black',
+  }
+  const weight = variant.weightMin === variant.weightMax
+    ? `${weightNames[variant.weightMin] ?? 'Weight'} · ${variant.weightMin}`
+    : `Variable · ${variant.weightMin}–${variant.weightMax}`
+  const style = variant.style === 'normal'
+    ? ''
+    : variant.style.startsWith('oblique')
+      ? 'Наклонный'
+      : 'Курсив'
+  return [style, weight].filter(Boolean).join(' · ')
+}
+
+function fontStyleName(style: string) {
+  if (style === 'normal') return 'Прямое начертание'
+  if (style === 'italic') return 'Курсивное начертание'
+  if (style.startsWith('oblique')) return 'Наклонное начертание'
+  return style
 }
 
 function fontFormat(path: string) {

@@ -1,9 +1,21 @@
+export type FontVariant = {
+  style: string
+  weightMin: number
+  weightMax: number
+}
+
 export type FontRecord = {
   id: string
   name: string
   family: string
   source: { kind: 'remote'; url: string } | { kind: 'file'; path: string }
   createdAt: string
+  variants?: FontVariant[]
+}
+
+export type ParsedFontFamily = {
+  family: string
+  variants: FontVariant[]
 }
 
 type PublicRepositorySettings = Pick<RepositorySettings, 'owner' | 'repo' | 'branch'>
@@ -103,12 +115,112 @@ function parseFonts(manifest: unknown): FontRecord[] {
   return manifest.fonts
 }
 
+export async function inspectRemoteFont(url: string): Promise<ParsedFontFamily[]> {
+  const response = await fetch(url)
+  if (!response.ok) {
+    throw new Error(`Не удалось загрузить CSS шрифта (${response.status}).`)
+  }
+
+  const css = await response.text()
+  const stylesheet = new CSSStyleSheet()
+  try {
+    await stylesheet.replace(css)
+  } catch {
+    throw new Error('Не удалось разобрать CSS. Проверьте ссылку и доступ к ней из браузера.')
+  }
+
+  const families = new Map<string, ParsedFontFamily>()
+  for (const rule of collectFontFaceRules(stylesheet.cssRules)) {
+    const rawFamily = rule.style.getPropertyValue('font-family').trim()
+    const family = rawFamily.replace(/^(['"])(.*)\1$/, '$2').replace(/\\(["'\\])/g, '$1').trim()
+    if (!family) continue
+
+    const style = rule.style.getPropertyValue('font-style').trim() || 'normal'
+    const weight = parseFontWeight(rule.style.getPropertyValue('font-weight'))
+    const key = family.toLocaleLowerCase()
+    const group = families.get(key) ?? { family, variants: [] }
+    const duplicate = group.variants.some(
+      (variant) =>
+        variant.style.toLowerCase() === style.toLowerCase() &&
+        variant.weightMin === weight.weightMin &&
+        variant.weightMax === weight.weightMax,
+    )
+
+    if (!duplicate) group.variants.push({ style, ...weight })
+    families.set(key, group)
+  }
+
+  if (families.size === 0) {
+    throw new Error('В таблице стилей не найдены описания @font-face.')
+  }
+
+  return [...families.values()].map(({ family, variants }) => ({
+    family,
+    variants: variants.sort(
+      (left, right) =>
+        left.style.localeCompare(right.style) ||
+        left.weightMin - right.weightMin ||
+        left.weightMax - right.weightMax,
+    ),
+  }))
+}
+
+function collectFontFaceRules(rules: CSSRuleList): CSSFontFaceRule[] {
+  const faces: CSSFontFaceRule[] = []
+  for (const rule of Array.from(rules)) {
+    if (rule.type === CSSRule.FONT_FACE_RULE) {
+      faces.push(rule as CSSFontFaceRule)
+    } else if ('cssRules' in rule) {
+      faces.push(...collectFontFaceRules((rule as CSSGroupingRule).cssRules))
+    }
+  }
+  return faces
+}
+
+function parseFontWeight(value: string) {
+  const values = (value.trim() || 'normal').split(/\s+/)
+  const toNumber = (weight: string) => {
+    if (weight === 'normal') return 400
+    if (weight === 'bold') return 700
+    const number = Number(weight)
+    if (Number.isFinite(number) && number >= 1 && number <= 1000) return number
+    throw new Error(`Неподдерживаемое значение font-weight: ${value || '(пусто)'}`)
+  }
+
+  const weights = values.map(toNumber)
+  if (weights.length < 1 || weights.length > 2) {
+    throw new Error(`Неподдерживаемое описание font-weight: ${value || '(пусто)'}`)
+  }
+
+  const [first, second = first] = weights
+  if (first === undefined || second === undefined || first > second) {
+    throw new Error(`Некорректный диапазон font-weight: ${value}`)
+  }
+
+  return { weightMin: first, weightMax: second }
+}
+
+function isFontVariant(value: unknown): value is FontVariant {
+  if (typeof value !== 'object' || value === null) return false
+  return 'style' in value &&
+    typeof value.style === 'string' &&
+    'weightMin' in value &&
+    typeof value.weightMin === 'number' &&
+    value.weightMin >= 1 &&
+    value.weightMin <= 1000 &&
+    'weightMax' in value &&
+    typeof value.weightMax === 'number' &&
+    value.weightMax >= value.weightMin &&
+    value.weightMax <= 1000
+}
+
 function isFontRecord(value: unknown): value is FontRecord {
   if (typeof value !== 'object' || value === null) return false
   if (!('id' in value) || typeof value.id !== 'string' || !value.id) return false
   if (!('name' in value) || typeof value.name !== 'string' || !value.name) return false
   if (!('family' in value) || typeof value.family !== 'string' || !value.family) return false
   if (!('createdAt' in value) || typeof value.createdAt !== 'string') return false
+  if ('variants' in value && (!Array.isArray(value.variants) || !value.variants.every(isFontVariant))) return false
   if (!('source' in value) || typeof value.source !== 'object' || value.source === null) return false
   if (!('kind' in value.source)) return false
   if (value.source.kind === 'remote') {
@@ -246,8 +358,16 @@ async function updateFonts(
   throw new Error('Не удалось обновить список: файл изменяется одновременно. Повторите попытку.')
 }
 
-export async function addFont(settings: RepositorySettings, font: FontRecord) {
-  return updateFonts(settings, (fonts) => [font, ...fonts.filter((item) => item.id !== font.id)], `Add font: ${font.name}`)
+export async function addFonts(settings: RepositorySettings, additions: FontRecord[]) {
+  const ids = new Set(additions.map((font) => font.id))
+  const message = additions.length === 1
+    ? `Add font: ${additions[0].name}`
+    : `Add fonts: ${additions.map((font) => font.name).join(', ')}`
+  return updateFonts(
+    settings,
+    (fonts) => [...additions, ...fonts.filter((font) => !ids.has(font.id))],
+    message,
+  )
 }
 
 export async function removeFont(settings: RepositorySettings, id: string, name: string) {
