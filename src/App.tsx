@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
+import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import {
   addFonts,
   deleteFontFile,
@@ -66,6 +66,9 @@ function App() {
     return !saved.owner || !saved.repo
   })
   const selectedFont = fonts.find((font) => font.id === selectedFontId)
+  const updateFontVariants = useCallback((fontId: string, variants: FontVariant[]) => {
+    setFonts((items) => items.map((item) => item.id === fontId ? { ...item, variants } : item))
+  }, [])
 
   useEffect(() => {
     const handleHashChange = () => setSelectedFontId(getFontIdFromHash())
@@ -288,6 +291,7 @@ function App() {
               canEdit={canEdit}
               saving={saving}
               onDelete={() => void handleDelete(selectedFont)}
+              onVariantsFound={updateFontVariants}
             />
           ) : loading ? (
             <div className="loading-state"><span className="spinner" />Загружаем шрифт…</div>
@@ -366,7 +370,7 @@ function App() {
                       <div>
                         <h3>{font.name}</h3>
                         <p>{font.family}</p>
-                        <p className="variant-count">{formatVariantCount(getFontVariants(font).length)}</p>
+                        <p className="variant-count">{fontVariantSummary(font)}</p>
                       </div>
                       <span className="source-tag">{font.source.kind === 'file' ? 'ФАЙЛ' : 'ССЫЛКА'}</span>
                     </div>
@@ -539,6 +543,7 @@ function FontDetail({
   canEdit,
   saving,
   onDelete,
+  onVariantsFound,
 }: {
   font: FontRecord
   error: string
@@ -546,9 +551,52 @@ function FontDetail({
   canEdit: boolean
   saving: boolean
   onDelete: () => void
+  onVariantsFound: (fontId: string, variants: FontVariant[]) => void
 }) {
-  const variants = getFontVariants(font)
+  const [discovery, setDiscovery] = useState<{
+    key: string
+    variants: FontVariant[]
+  } | null>(null)
+  const [discoveryError, setDiscoveryError] = useState<{ key: string; message: string } | null>(null)
+  const remoteUrl = font.source.kind === 'remote' ? font.source.url : ''
+  const discoveryKey = `${font.id}:${remoteUrl}`
+  const needsDiscovery = Boolean(remoteUrl && !font.variants?.length)
+  const discoveredVariants = discovery?.key === discoveryKey ? discovery.variants : null
+  const currentDiscoveryError = discoveryError?.key === discoveryKey ? discoveryError.message : ''
+  const isDiscovering = needsDiscovery && !discoveredVariants && !currentDiscoveryError
+  const variants = font.variants?.length
+    ? font.variants
+    : discoveredVariants ?? getFontVariants(font)
   const firstVariant = variants[0]
+
+  useEffect(() => {
+    if (!needsDiscovery) return
+
+    let active = true
+    void inspectRemoteFont(remoteUrl)
+      .then((families) => {
+        const family = families.find((item) => item.family.toLocaleLowerCase() === font.family.toLocaleLowerCase())
+        if (!family) {
+          throw new Error(`В CSS не найдено семейство «${font.family}».`)
+        }
+        if (active) {
+          setDiscovery({ key: discoveryKey, variants: family.variants })
+          onVariantsFound(font.id, family.variants)
+        }
+      })
+      .catch((cause: unknown) => {
+        if (active) {
+          setDiscoveryError({
+            key: discoveryKey,
+            message: cause instanceof Error ? cause.message : 'Не удалось определить варианты шрифта.',
+          })
+        }
+      })
+
+    return () => {
+      active = false
+    }
+  }, [needsDiscovery, remoteUrl, font.family, font.id, discoveryKey, onVariantsFound])
 
   return (
     <section className="font-detail">
@@ -557,7 +605,7 @@ function FontDetail({
         <div>
           <div className="eyebrow"><span className="eyebrow-line" /> СЕМЕЙСТВО ШРИФТА</div>
           <h1>{font.name}</h1>
-          <p>{formatVariantCount(variants.length)} · {font.family}</p>
+          <p>{isDiscovering ? 'Определяем варианты…' : `${formatVariantCount(variants.length)} · ${font.family}`}</p>
         </div>
         <button
           className="button button-secondary detail-delete"
@@ -572,6 +620,11 @@ function FontDetail({
       {(error || notice) && (
         <div className={`feedback ${error ? 'feedback-error' : 'feedback-success'}`} role="status">
           {error || notice}
+        </div>
+      )}
+      {currentDiscoveryError && (
+        <div className="feedback feedback-error" role="status">
+          Не удалось определить варианты: {currentDiscoveryError}
         </div>
       )}
 
@@ -595,11 +648,15 @@ function FontDetail({
         </div>
       </div>
 
-      <div className="variant-grid">
-        {variants.map((variant) => (
-          <VariantPreview key={`${variant.style}-${variant.weightMin}-${variant.weightMax}`} font={font} variant={variant} />
-        ))}
-      </div>
+      {isDiscovering ? (
+        <div className="loading-state"><span className="spinner" />Читаем @font-face…</div>
+      ) : (
+        <div className="variant-grid">
+          {variants.map((variant) => (
+            <VariantPreview key={`${variant.style}-${variant.weightMin}-${variant.weightMax}`} font={font} variant={variant} />
+          ))}
+        </div>
+      )}
     </section>
   )
 }
@@ -666,6 +723,13 @@ function formatVariantCount(count: number) {
         ? 'варианта'
         : 'вариантов'
   return `${count} ${word}`
+}
+
+function fontVariantSummary(font: FontRecord) {
+  if (!font.variants?.length && font.source.kind === 'remote') {
+    return 'варианты не проверены'
+  }
+  return formatVariantCount(getFontVariants(font).length)
 }
 
 function variantLabel(variant: FontVariant) {
