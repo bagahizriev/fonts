@@ -2,6 +2,28 @@
   "version": 1,
   "fonts": [
     {
+      "id": "08c13f05-58f4-467a-b862-84e67b7094c4",
+      "name": "Montserrat",
+      "family": "Montserrat",
+      "source": {
+        "kind": "remote",
+        "url": "https://fonts.googleapis.com/css2?family=Montserrat:ital,wght@0,100..900;1,100..900&display=swap"
+      },
+      "variants": [
+        {
+          "style": "italic",
+          "weightMin": 100,
+          "weightMax": 900
+        },
+        {
+          "style": "normal",
+          "weightMin": 100,
+          "weightMax": 900
+        }
+      ],
+      "createdAt": "2026-11-21T03:55:38.267Z"
+    },
+    {
       "id": "c5290d74-b910-49e7-8af1-87b86b0e6bda",
       "name": "Oswald",
       "family": "Oswald",
