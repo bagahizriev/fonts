@@ -2,6 +2,16 @@
   "version": 1,
   "fonts": [
     {
+      "id": "407dd377-0187-4567-a9d5-880e40be4b53",
+      "name": "Dela Gothic One",
+      "family": "Dela Gothic One",
+      "source": {
+        "kind": "remote",
+        "url": "https://fonts.googleapis.com/css2?family=Dela+Gothic+One&display=swap"
+      },
+      "createdAt": "2026-11-21T03:25:25.991Z"
+    },
+    {
       "id": "55b3222b-ef1e-43a7-a0dd-86a56f05b928",
       "name": "Dela Gothic",
       "family": "Dela Gothic",
