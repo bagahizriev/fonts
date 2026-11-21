@@ -2,6 +2,16 @@
   "version": 1,
   "fonts": [
     {
+      "id": "c5290d74-b910-49e7-8af1-87b86b0e6bda",
+      "name": "Oswald",
+      "family": "Oswald",
+      "source": {
+        "kind": "remote",
+        "url": "https://fonts.googleapis.com/css2?family=Oswald:wght@200..700&display=swap"
+      },
+      "createdAt": "2026-11-21T03:37:52.692Z"
+    },
+    {
       "id": "407dd377-0187-4567-a9d5-880e40be4b53",
       "name": "Dela Gothic One",
       "family": "Dela Gothic One",
