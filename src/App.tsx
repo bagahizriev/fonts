@@ -1,8 +1,9 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import {
+  addFont,
   deleteFontFile,
   loadFonts,
-  saveFonts,
+  removeFont,
   uploadFontFile,
   type FontRecord,
   type RepositorySettings,
@@ -151,8 +152,8 @@ function App() {
         source = { kind: 'remote', url }
       }
 
-      const next = [{ id, name, family, source, createdAt: new Date().toISOString() }, ...fonts]
-      await saveFonts(settings, next, `Add font: ${name}`)
+      const font: FontRecord = { id, name, family, source, createdAt: new Date().toISOString() }
+      const next = await addFont(settings, font)
       uploadedPath = undefined
       setFonts(next)
       setShowAdd(false)
@@ -179,9 +180,8 @@ function App() {
     setError('')
     setNotice('')
 
-    const next = fonts.filter((item) => item.id !== font.id)
     try {
-      await saveFonts(settings, next, `Remove font: ${font.name}`)
+      const next = await removeFont(settings, font.id, font.name)
       setFonts(next)
 
       if (font.source.kind === 'file') {

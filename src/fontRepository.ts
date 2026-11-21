@@ -6,7 +6,6 @@ export type FontRecord = {
   createdAt: string
 }
 
-type FontManifest = { version: 1; fonts: FontRecord[] }
 type PublicRepositorySettings = Pick<RepositorySettings, 'owner' | 'repo' | 'branch'>
 
 export type RepositorySettings = {
@@ -47,12 +46,12 @@ function ensureWritable(settings: RepositorySettings) {
 }
 
 function branchQuery(branch: string) {
-  return `?ref=${encodeURIComponent(branch)}`
+  return `?ref=${encodeURIComponent(branch)}&_=${Date.now()}`
 }
 
 export async function loadFonts(settings: PublicRepositorySettings): Promise<FontRecord[]> {
   const branch = settings.branch.split('/').map(encodeURIComponent).join('/')
-  const url = `https://raw.githubusercontent.com/${encodeURIComponent(settings.owner)}/${encodeURIComponent(settings.repo)}/${branch}/public/fonts.json`
+  const url = `https://raw.githubusercontent.com/${encodeURIComponent(settings.owner)}/${encodeURIComponent(settings.repo)}/${branch}/public/fonts.json?t=${Date.now()}`
   const response = await fetch(url, { cache: 'no-store' })
 
   if (response.status === 404) return []
@@ -60,7 +59,10 @@ export async function loadFonts(settings: PublicRepositorySettings): Promise<Fon
     throw new Error(`Не удалось прочитать список шрифтов (${response.status}). Проверьте владельца, репозиторий и ветку.`)
   }
 
-  const manifest: unknown = await response.json()
+  return parseFonts(await response.json())
+}
+
+function parseFonts(manifest: unknown): FontRecord[] {
   if (
     typeof manifest !== 'object' ||
     manifest === null ||
@@ -101,8 +103,11 @@ function isFontRecord(value: unknown): value is FontRecord {
   return false
 }
 
-async function getFileSha(settings: RepositorySettings, path: string): Promise<string | undefined> {
+type GitHubFile = { sha: string; content?: string; encoding?: string }
+
+async function getFile(settings: RepositorySettings, path: string): Promise<GitHubFile | undefined> {
   const response = await fetch(`${contentsUrl(settings, path)}${branchQuery(settings.branch)}`, {
+    cache: 'no-store',
     headers: authHeaders(settings),
   })
 
@@ -111,8 +116,11 @@ async function getFileSha(settings: RepositorySettings, path: string): Promise<s
     throw new Error(`GitHub не смог прочитать ${path}: ${await readApiError(response)}`)
   }
 
-  const file = await response.json() as { sha: string }
-  return file.sha
+  return await response.json() as GitHubFile
+}
+
+async function getFileSha(settings: RepositorySettings, path: string): Promise<string | undefined> {
+  return (await getFile(settings, path))?.sha
 }
 
 function encodeBase64(bytes: Uint8Array) {
@@ -148,14 +156,77 @@ async function putFile(
   }
 }
 
-export async function saveFonts(
+function decodeBase64(value: string) {
+  const binary = atob(value.replace(/\s/g, ''))
+  const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0))
+  return new TextDecoder().decode(bytes)
+}
+
+function isShaConflict(status: number, message: string) {
+  return status === 409 || (status === 422 && /sha|does not match/i.test(message))
+}
+
+async function updateFonts(
   settings: RepositorySettings,
-  fonts: FontRecord[],
+  update: (fonts: FontRecord[]) => FontRecord[],
   message: string,
-) {
-  const manifest: FontManifest = { version: 1, fonts }
-  const bytes = new TextEncoder().encode(`${JSON.stringify(manifest, null, 2)}\n`)
-  await putFile(settings, 'public/fonts.json', encodeBase64(bytes), message)
+): Promise<FontRecord[]> {
+  ensureWritable(settings)
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const file = await getFile(settings, 'public/fonts.json')
+    let fonts: FontRecord[] = []
+
+    if (file) {
+      if (!file.content || file.encoding !== 'base64') {
+        throw new Error('GitHub вернул public/fonts.json в неподдерживаемом формате.')
+      }
+      try {
+        fonts = parseFonts(JSON.parse(decodeBase64(file.content)))
+      } catch (cause) {
+        throw new Error(
+          `Не удалось прочитать public/fonts.json: ${cause instanceof Error ? cause.message : 'неверный JSON'}`,
+        )
+      }
+    }
+
+    const nextFonts = update(fonts)
+    if (nextFonts.length === fonts.length && nextFonts.every((font, index) => font === fonts[index])) {
+      return fonts
+    }
+    const content = encodeBase64(
+      new TextEncoder().encode(`${JSON.stringify({ version: 1, fonts: nextFonts }, null, 2)}\n`),
+    )
+    const response = await fetch(contentsUrl(settings, 'public/fonts.json'), {
+      method: 'PUT',
+      cache: 'no-store',
+      headers: { ...authHeaders(settings), 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        message,
+        content,
+        branch: settings.branch,
+        ...(file ? { sha: file.sha } : {}),
+      }),
+    })
+
+    if (response.ok) return nextFonts
+
+    const error = await readApiError(response)
+    if (attempt < 2 && isShaConflict(response.status, error)) {
+      continue
+    }
+    throw new Error(`GitHub не сохранил public/fonts.json: ${error}`)
+  }
+
+  throw new Error('Не удалось обновить список: файл изменяется одновременно. Повторите попытку.')
+}
+
+export async function addFont(settings: RepositorySettings, font: FontRecord) {
+  return updateFonts(settings, (fonts) => [font, ...fonts.filter((item) => item.id !== font.id)], `Add font: ${font.name}`)
+}
+
+export async function removeFont(settings: RepositorySettings, id: string, name: string) {
+  return updateFonts(settings, (fonts) => fonts.filter((font) => font.id !== id), `Remove font: ${name}`)
 }
 
 export async function uploadFontFile(
